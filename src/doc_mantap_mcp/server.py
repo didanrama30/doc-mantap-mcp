@@ -9,11 +9,14 @@ from docx.oxml.ns import qn
 from lxml import etree
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.resources.templates import ResourceSecurity
 from mcp_types import ToolAnnotations
 
 from .docx_render import render_docx
 from .docx_inspect import outline_docx, read_docx
-from .docx_patch import insert_image, patch_docx
+from .docx_patch import (fill_template, find_text, insert_image, patch_docx,
+                         replace_text_all)
+from .doctor import environment_report
 from .guide import guide
 from .pdf import render_pdf
 from .pdf_read import read_pdf_text
@@ -36,8 +39,10 @@ mcp = MCPServer(
         "- Spreadsheets: create_excel builds designed workbooks with real Excel tables, "
         "formulas, KPI cards, conditional formatting and native charts.\n"
         "- Existing files: docx_read/docx_outline inspect Word templates, docx_patch makes "
-        "anchored edits, and pdf_read_text extracts PDF page text. markdown_to_docx supports "
-        "mode='append' with target_path to add Markdown to an existing Word file.\n"
+        "anchored edits, docx_find/docx_replace_all search templates, and "
+        "docx_fill_template fills placeholders in single or batch mode. pdf_read_text extracts "
+        "PDF text. markdown_to_docx supports mode='append' with target_path. Use doctor to "
+        "check dependencies; docx://{path}#outline exposes document structure as a resource.\n"
         "Call design_guide once for the full syntax and design rules, list_themes for themes, "
         "and preview_document to look at the result before handing it over."
     ),
@@ -58,7 +63,8 @@ def _explain(func):
             return func(*args, **kwargs)
         except ToolError:
             raise
-        except (ValueError, RuntimeError, OSError) as exc:
+        except (ValueError, RuntimeError, OSError, KeyError, TypeError, IndexError,
+                zipfile.BadZipFile, etree.XMLSyntaxError) as exc:
             raise ToolError(str(exc)) from exc
     return wrapper
 
@@ -104,10 +110,12 @@ def docx_outline(path: str) -> dict:
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Patch Word document", read_only_hint=False,
-                                     destructive_hint=True, idempotent_hint=False))
+                                     destructive_hint=True, idempotent_hint=True))
 @_explain
-def docx_patch(path: str, operations: list[dict], output_path: str | None = None,
-               backup: bool = True, overwrite: bool = False) -> dict:
+def docx_patch(path: str | None = None, operations: list[dict] | None = None,
+               output_path: str | None = None, backup: bool = True,
+               overwrite: bool = False, idempotent: bool = True,
+               batch: list[dict] | None = None) -> dict:
     """Patch existing DOCX/DOCM in OOXML without regenerating its structure.
 
     Operations: replace_text(anchor, new_text), insert_after(anchor, paragraphs),
@@ -115,7 +123,74 @@ def docx_patch(path: str, operations: list[dict], output_path: str | None = None
     insert_code_block(anchor, text). Default output is a new .patched file. To edit
     in place, set output_path to path; an unused .bak is required automatically.
     """
-    return patch_docx(path, operations, output_path, backup, overwrite)
+    if batch is not None:
+        results = []
+        for item in batch:
+            results.append(patch_docx(item["path"], item["operations"],
+                                      item.get("output_path"), backup, overwrite, idempotent))
+        return {"count": len(results), "results": results}
+    if not path or operations is None:
+        raise ValueError("path and operations are required unless batch is provided")
+    return patch_docx(path, operations, output_path, backup, overwrite, idempotent)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Find Word text", read_only_hint=True))
+@_explain
+def docx_find(path: str, query: str, regex: bool = False,
+              case_sensitive: bool = True) -> dict:
+    """Find text across body paragraphs, tables, headers and footers."""
+    return find_text(path, query, regex, case_sensitive)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Replace Word text", read_only_hint=False,
+                                     destructive_hint=True, idempotent_hint=True))
+@_explain
+def docx_replace_all(path: str, find: str, replace: str, regex: bool = False,
+                     case_sensitive: bool = True, output_path: str | None = None,
+                     backup: bool = True, overwrite: bool = False) -> dict:
+    """Run-aware replacement across body, tables, headers and footers."""
+    return replace_text_all(path, find, replace, regex, case_sensitive,
+                            output_path, backup, overwrite)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Fill Word template", read_only_hint=False,
+                                     destructive_hint=True, idempotent_hint=True))
+@_explain
+def docx_fill_template(path: str | None = None, data: dict | None = None,
+                       output_path: str | None = None, backup: bool = True,
+                       overwrite: bool = False, batch: list[dict] | None = None) -> dict:
+    """Fill {{key}} placeholders, including table/header/footer text; supports batches.
+
+    Batch items: {"path": "...docx", "data": {"key": "value"}, "output_path": "..."}.
+    Repeating a completed fill is a no-op rather than duplicating text.
+    """
+    if batch is not None:
+        results = []
+        for item in batch:
+            item_data = item.get("data", data)
+            if item_data is None:
+                raise ValueError("Each batch item needs data, or pass shared data")
+            results.append(fill_template(item["path"], item_data, item.get("output_path"),
+                                         backup, overwrite))
+        return {"count": len(results), "results": results}
+    if not path or data is None:
+        raise ValueError("path and data are required unless batch is provided")
+    return fill_template(path, data, output_path, backup, overwrite)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Environment doctor", read_only_hint=True))
+def doctor() -> dict:
+    """Check Python/native dependencies, Office tools, OCR languages and fonts."""
+    return environment_report()
+
+
+@mcp.resource("docx://{+path}#outline", name="DOCX outline", mime_type="application/json",
+              description="Heading and table outline for a local DOCX/DOCM file.",
+              security=ResourceSecurity(reject_absolute_paths=False))
+@_explain
+def docx_outline_resource(path: str) -> str:
+    """Expose the same compact outline through a docx:// resource URI."""
+    return json.dumps(outline_docx(path), ensure_ascii=False)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Insert image in Word", read_only_hint=False,
