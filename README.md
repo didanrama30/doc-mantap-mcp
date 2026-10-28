@@ -12,6 +12,7 @@ The AI writes Markdown or a small declarative spec, and doc-mantap-mcp turns it 
 - `markdown_to_docx`: Markdown to an editable Word document
 - `docx_read` / `docx_outline`: inspect Word text, structure, formatting and placeholders
 - `docx_patch`: make anchored, in-place-safe edits to an existing DOCX/DOCM
+- `docx_insert_image`: insert screenshots into paragraphs or table cells
 - `pdf_read_text`: extract PDF text page by page, with optional Tesseract OCR fallback
 - `create_excel`: designed workbook with real Excel tables, formulas and charts
 - `preview_document`: render pages of a generated file as images to check the layout
@@ -44,12 +45,20 @@ Also supported: tables, footnotes, task lists, definition lists, images with cap
 
 To add Markdown to an existing Word template, call `markdown_to_docx` with
 `mode="append"`, `target_path="template.docx"`, and an optional `start_after` paragraph
-anchor. Existing document styles and headers/footers are retained. `docx_patch` writes a
-new `.patched.docx` by default; explicit in-place edits create a `.bak` first.
+anchor. Without `output_path`, it writes a sibling `.appended.docx`; use the target path as
+`output_path` to update it with a `.bak` backup. Existing document styles and headers/footers
+are retained. `docx_patch` and `docx_insert_image` write a new `.patched.docx` by default;
+explicit in-place edits create a `.bak` first. Package parts not involved in image insertion
+or XML patching remain untouched.
 
 `pdf_read_text` extracts native page text without Office software. Scanned pages use
 Tesseract when available (`brew install tesseract tesseract-lang` on macOS or
 `apt install tesseract-ocr tesseract-ocr-ind` on Debian/Ubuntu).
+
+`preview_document` tries LibreOffice, Microsoft Word automation (macOS/Windows), then
+macOS QuickLook for Office files. It returns rendered image content plus JSON metadata
+(page numbers, image paths/URIs and dimensions). Page selection, width/DPI, PNG/JPEG,
+and `max_pages` are configurable; cached previews invalidate when file content changes.
 
 ## Setup
 
