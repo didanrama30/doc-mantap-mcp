@@ -1,6 +1,7 @@
 """doc-mantap-mcp server."""
 
 import functools
+import json
 from typing import Literal
 
 from mcp.server.mcpserver import Image, MCPServer
@@ -9,7 +10,7 @@ from mcp_types import ToolAnnotations
 
 from .docx_render import render_docx
 from .docx_inspect import outline_docx, read_docx
-from .docx_patch import patch_docx
+from .docx_patch import insert_image, patch_docx
 from .guide import guide
 from .pdf import render_pdf
 from .pdf_read import read_pdf_text
@@ -105,6 +106,25 @@ def docx_patch(path: str, operations: list[dict], output_path: str | None = None
     in place, set output_path to path; an unused .bak is required automatically.
     """
     return patch_docx(path, operations, output_path, backup, overwrite)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Insert image in Word", read_only_hint=False,
+                                     destructive_hint=True, idempotent_hint=False))
+@_explain
+def docx_insert_image(path: str, image_path: str, anchor: str | None = None,
+                      position: Literal["after", "before", "replace", "append_cell"] = "after",
+                      width_cm: float | None = None, caption: str | None = None,
+                      alignment: Literal["left", "center", "right"] = "center",
+                      table: int = 0, row: int | None = None, col: int | None = None,
+                      output_path: str | None = None, backup: bool = True,
+                      overwrite: bool = False) -> dict:
+    """Insert image before/after a paragraph, replace it, or append to a table cell.
+
+    Preserves existing package parts. Defaults to a new .patched file; explicit in-place
+    edits create a .bak first. Table row/col are zero-based logical cell coordinates.
+    """
+    return insert_image(path, image_path, anchor, position, width_cm, caption, alignment,
+                        table, row, col, output_path, backup, overwrite)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Read PDF text", read_only_hint=True))
@@ -249,19 +269,36 @@ def create_excel(output_path: str, sheets: list[Sheet], theme: str = "modern",
 
 @mcp.tool(annotations=ToolAnnotations(title="Preview document", read_only_hint=True))
 @_explain
-def preview_document(path: str, pages: str = "1-2", width: int = 1000) -> list:
-    """Render pages of a PDF (or DOCX/XLSX when LibreOffice is installed) as images.
+def preview_document(path: str, pages: str = "1-2", width: int = 1000,
+                     dpi: int | None = None, format: Literal["png", "jpeg"] = "png",
+                     max_pages: int = 6) -> list:
+    """Render selected PDF/Office pages as image content plus JSON artifact metadata.
 
     Use it after creating a document to check covers, page breaks, tables and charts.
 
     Args:
         path: File to preview.
-        pages: Pages to render, e.g. "1", "1-3", "2,5" or "all" (max 6 per call).
-        width: Image width in pixels (300-1800).
+        pages: Pages to render, e.g. "1", "1,3-5" or "all".
+        width: Image width in pixels (300-1800); ignored when dpi is supplied.
+        dpi: Render resolution (72-600 DPI), optional.
+        format: PNG or JPEG image output.
+        max_pages: Limit rendered pages to 1-50 (default 6).
     """
-    images, count, note = render_pages(path, pages, width)
-    text = f"{path}: showing {len(images)} of {count} page(s). {note}".strip()
-    return [text, *(Image(data=png, format="png") for png in images)]
+    result = render_pages(path, pages, width, dpi, format, max_pages)
+    if not result.images:
+        raise ToolError(f"Preview produced no images for {path}; no success response returned.")
+    metadata = {
+        "path": path,
+        "total_pages": result.total_pages,
+        "rendered_pages": [image.page for image in result.images],
+        "renderer_used": result.renderer_used,
+        "note": result.note,
+        "images": [{"page": image.page, "path": image.path, "uri": image.uri,
+                    "width": image.width, "height": image.height, "format": image.format,
+                    "byte_size": len(image.data)} for image in result.images],
+    }
+    return [json.dumps(metadata, ensure_ascii=False),
+            *(Image(data=image.data, format=image.format) for image in result.images)]
 
 
 def main() -> None:
