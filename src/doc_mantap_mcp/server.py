@@ -2,8 +2,11 @@
 
 import functools
 import json
+import zipfile
 from typing import Literal
 
+from docx.oxml.ns import qn
+from lxml import etree
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
@@ -58,6 +61,13 @@ def _explain(func):
         except (ValueError, RuntimeError, OSError) as exc:
             raise ToolError(str(exc)) from exc
     return wrapper
+
+
+def _docx_counts(path: str) -> tuple[int, int]:
+    """Count body paragraphs/tables directly so DOCM is supported too."""
+    with zipfile.ZipFile(path) as package:
+        root = etree.fromstring(package.read("word/document.xml"))
+    return len(list(root.iter(qn("w:p")))), len(list(root.iter(qn("w:tbl"))))
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List themes", read_only_hint=True))
@@ -220,6 +230,7 @@ def markdown_to_docx(content: str, output_path: str | None = None, theme: str = 
         target_path: Existing .docx to preserve and append into when mode="append".
         start_after: Unique paragraph text or p:index insertion point in append mode.
     """
+    before_counts = _docx_counts(target_path) if mode == "append" and target_path else None
     path = render_docx(content, output_path, get_theme(theme, primary_color, accent_color),
                        title, subtitle, author, date, organization=organization,
                        document_type=document_type, logo=logo, cover_style=cover_style,
@@ -228,7 +239,15 @@ def markdown_to_docx(content: str, output_path: str | None = None, theme: str = 
                        start_after=start_after)
     note = " Word will offer to update fields on open; accept to fill in the TOC." if toc else ""
     action = "DOCX updated" if mode == "append" else "DOCX created"
-    return f"{action}: {path}.{note}"
+    diff = ""
+    if before_counts:
+        after_paragraphs, after_tables = _docx_counts(str(path))
+        added = max(after_paragraphs - before_counts[0], 0)
+        removed = max(before_counts[0] - after_paragraphs, 0)
+        table_delta = after_tables - before_counts[1]
+        diff = f" Diff: {added} paragraph(s) added, {removed} removed; " \
+               f"table count changed by {table_delta:+d}."
+    return f"{action}: {path}.{diff}{note}"
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Create Excel workbook", **_WRITE))
