@@ -2,6 +2,7 @@
 
 import functools
 import json
+import os
 import zipfile
 from typing import Literal
 
@@ -10,6 +11,7 @@ from lxml import etree
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resources.templates import ResourceSecurity
+from mcp.server.streamable_http import TransportSecuritySettings
 from mcp_types import ToolAnnotations
 
 from .docx_render import render_docx
@@ -396,7 +398,31 @@ def preview_document(path: str, pages: str = "1-2", width: int = 1000,
 
 
 def main() -> None:
-    mcp.run()
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").strip().lower()
+    if transport == "stdio":
+        mcp.run()
+        return
+    if transport != "streamable-http":
+        raise ValueError("MCP_TRANSPORT must be 'stdio' or 'streamable-http'")
+
+    allowed_hosts = [value.strip() for value in
+                     os.environ.get("MCP_ALLOWED_HOSTS",
+                                    "localhost:*,127.0.0.1:*").split(",")
+                     if value.strip()]
+    allowed_origins = [value.strip() for value in
+                       os.environ.get("MCP_ALLOWED_ORIGINS", "").split(",")
+                       if value.strip()]
+    security = TransportSecuritySettings(allowed_hosts=allowed_hosts,
+                                         allowed_origins=allowed_origins)
+    mcp.run(
+        transport="streamable-http",
+        host=os.environ.get("MCP_HOST", "0.0.0.0"),
+        port=int(os.environ.get("MCP_PORT", "8000")),
+        streamable_http_path=os.environ.get("MCP_PATH", "/mcp"),
+        json_response=True,
+        stateless_http=True,
+        transport_security=security,
+    )
 
 
 if __name__ == "__main__":
