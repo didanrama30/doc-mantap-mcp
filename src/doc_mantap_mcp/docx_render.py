@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import io
 import re
+import os
+import shutil
+import tempfile
+import zipfile
+from collections import Counter
 import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -20,6 +25,7 @@ from docx.oxml.ns import nsdecls, qn
 from docx.shared import Cm, Emu, Mm, Pt, RGBColor
 from docx.text.run import Run
 from docx.text.paragraph import Paragraph
+from lxml import etree
 
 from . import highlight
 from .charts import render_chart
@@ -1169,6 +1175,18 @@ def _tab_leader_dots():
     return WD_TAB_LEADER.DOTS
 
 
+def _heading_texts(element) -> list[str]:
+    result = []
+    for paragraph in element.iter(qn("w:p")):
+        ppr = paragraph.find(qn("w:pPr"))
+        style = ppr.find(qn("w:pStyle")) if ppr is not None else None
+        if style is not None and style.get(qn("w:val"), "").lower().startswith("heading"):
+            text = "".join(node.text or "" for node in paragraph.iter(qn("w:t")))
+            if text:
+                result.append(text)
+    return result
+
+
 def _wrap(node) -> Tag:
     """Wrap a single node in a span so it can go through `inline`."""
     span = Tag(name="span")
@@ -1191,10 +1209,13 @@ def render_docx(content: str, output_path: str | None, theme: Theme, title: str 
         raise ValueError("target_path is required when mode='append'")
     if mode == "append" and output_path is None:
         target_hint = Path(target_path).expanduser().resolve()
-        output_path = str(target_hint.with_name(f"{target_hint.stem}.appended.docx"))
+        if target_hint.suffix.lower() not in (".docx", ".docm"):
+            raise ValueError("Append mode supports .docx and .docm targets")
+        output_path = str(target_hint.with_name(f"{target_hint.stem}.appended{target_hint.suffix}"))
     if not output_path:
         raise ValueError("output_path is required when mode='create'")
-    out = prepare_output(output_path, ".docx")
+    suffix = Path(target_path).suffix.lower() if mode == "append" else ".docx"
+    out = prepare_output(output_path, suffix)
     base = Path(base_dir).expanduser().resolve() if base_dir else out.parent
     if mode == "create" and (cover_style or theme.cover).lower() not in COVER_STYLES:
         raise ValueError(f"Unknown cover_style '{cover_style}'. Use: {', '.join(COVER_STYLES)}.")
@@ -1211,11 +1232,41 @@ def render_docx(content: str, output_path: str | None, theme: Theme, title: str 
         target = Path(target_path).expanduser().resolve()
         if not target.is_file():
             raise ValueError(f"Target document not found: {target}")
-        if target.suffix.lower() != ".docx":
-            raise ValueError("markdown_to_docx append mode currently supports .docx targets")
+        if target.suffix.lower() not in (".docx", ".docm"):
+            raise ValueError("markdown_to_docx append mode supports .docx and .docm targets")
         if out.exists() and out != target:
             raise ValueError(f"Output already exists: {out}; choose a new output_path")
-        d = Document(str(target))
+        if target.suffix.lower() == ".docm":
+            fd, normalized = tempfile.mkstemp(prefix="doc-mantap-", suffix=".docx")
+            os.close(fd)
+            try:
+                with zipfile.ZipFile(target) as original, zipfile.ZipFile(
+                        normalized, "w", zipfile.ZIP_DEFLATED) as compatible:
+                    parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
+                    for info in original.infolist():
+                        content = original.read(info.filename)
+                        if info.filename == "[Content_Types].xml":
+                            content_types = etree.fromstring(content, parser)
+                            for override in content_types:
+                                if (override.tag.endswith("Override") and
+                                        override.get("PartName") == "/word/document.xml"):
+                                    override.set("ContentType",
+                                        "application/vnd.openxmlformats-officedocument."
+                                        "wordprocessingml.document.main+xml")
+                            content = etree.tostring(content_types, xml_declaration=True,
+                                                     encoding="UTF-8", standalone=True)
+                        compatible.writestr(info, content)
+                d = Document(normalized)
+                d.part._content_type = (
+                    "application/vnd.ms-word.document.macroEnabled.main+xml")
+            finally:
+                if os.path.exists(normalized):
+                    os.unlink(normalized)
+        else:
+            d = Document(str(target))
+        headings_before = _heading_texts(d.element.body)
+        paragraphs_before = len(list(d.element.body.iter(qn("w:p"))))
+        tables_before = len(list(d.element.body.iter(qn("w:tbl"))))
         section = d.sections[-1]
         setup = PageSetup(section.page_width.mm, section.page_height.mm,
                           section.left_margin.mm, section.top_margin.mm,
@@ -1276,18 +1327,38 @@ def render_docx(content: str, output_path: str | None, theme: Theme, title: str 
             child.getparent().remove(child)
             cursor.addnext(child)
             cursor = child
-    if mode == "append" and target == out:
-        backup = target.with_suffix(target.suffix + ".bak")
-        if backup.exists():
+    if mode == "append":
+        backup = target.with_suffix(target.suffix + ".bak") if target == out else None
+        if backup and backup.exists():
             raise ValueError(f"Backup already exists: {backup}; refusing to overwrite it")
-        import os
-        import shutil
-        import tempfile
         fd, temporary = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=out.parent)
         os.close(fd)
         try:
             d.save(temporary)
-            shutil.copy2(target, backup)
+            with zipfile.ZipFile(target) as original, zipfile.ZipFile(temporary) as updated:
+                bad = updated.testzip()
+                if bad:
+                    raise ValueError(f"Appended DOCX ZIP validation failed at {bad}")
+                missing_parts = set(original.namelist()) - set(updated.namelist())
+                if missing_parts:
+                    raise ValueError("Append would drop original package part(s): "
+                                     + ", ".join(sorted(missing_parts)))
+                parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
+                for name in (n for n in updated.namelist()
+                             if n.endswith((".xml", ".rels"))):
+                    etree.fromstring(updated.read(name), parser)
+                check_root = etree.fromstring(updated.read("word/document.xml"), parser)
+                updated_body = check_root.find(qn("w:body"))
+                if updated_body is None:
+                    raise ValueError("Appended document has no body")
+                if len(list(updated_body.iter(qn("w:p")))) < paragraphs_before:
+                    raise ValueError("Append unexpectedly removed one or more paragraphs")
+                if len(list(updated_body.iter(qn("w:tbl")))) < tables_before:
+                    raise ValueError("Append unexpectedly removed one or more tables")
+                if not Counter(_heading_texts(check_root)) >= Counter(headings_before):
+                    raise ValueError("Append would alter or remove an existing heading")
+            if backup:
+                shutil.copy2(target, backup)
             os.replace(temporary, out)
         except Exception:
             if os.path.exists(temporary):
