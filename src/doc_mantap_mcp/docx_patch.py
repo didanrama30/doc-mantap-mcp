@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -19,6 +20,18 @@ XML_SPACE = "http://www.w3.org/XML/1998/namespace"
 
 def _text(paragraph) -> str:
     return "".join(node.text or "" for node in paragraph.iter(qn("w:t")))
+
+
+def _visible_text(paragraph) -> str:
+    parts = []
+    for node in paragraph.iter():
+        if node.tag == qn("w:t"):
+            parts.append(node.text or "")
+        elif node.tag == qn("w:br"):
+            parts.append("\n")
+        elif node.tag == qn("w:tab"):
+            parts.append("\t")
+    return "".join(parts)
 
 
 def _all_paragraphs(body) -> list:
@@ -126,7 +139,13 @@ def _replace_in_paragraph(paragraph, needle: str, replacement: str) -> bool:
     start = joined.find(needle)
     if start < 0:
         return False
-    end = start + len(needle)
+    _replace_range(paragraph, start, start + len(needle), replacement)
+    return True
+
+
+def _replace_range(paragraph, start: int, end: int, replacement: str) -> None:
+    nodes = list(paragraph.iter(qn("w:t")))
+    texts = [node.text or "" for node in nodes]
     starts, cursor = [], 0
     for text in texts:
         starts.append(cursor)
@@ -145,7 +164,196 @@ def _replace_in_paragraph(paragraph, needle: str, replacement: str) -> bool:
     for node in (nodes[first], nodes[last]):
         if (node.text or "")[:1].isspace() or (node.text or "")[-1:].isspace():
             node.set(f"{{{XML_SPACE}}}space", "preserve")
-    return True
+
+
+def _document_parts(package: zipfile.ZipFile) -> list[str]:
+    return [name for name in package.namelist()
+            if name == "word/document.xml" or re.fullmatch(r"word/(header|footer)\d+\.xml", name)]
+
+
+def _rewrite_parts(path: str, modified: dict[str, bytes], output_path: str | None,
+                   backup: bool, overwrite: bool) -> dict:
+    src = Path(path).expanduser().resolve()
+    if not src.is_file():
+        raise ValueError(f"DOCX file not found: {src}")
+    if src.suffix.lower() not in (".docx", ".docm"):
+        raise ValueError("DOCX operations support .docx and .docm files")
+    if not modified:
+        return {"path": str(src), "changed": False, "backup": None}
+    dest = Path(output_path).expanduser().resolve() if output_path else src.with_name(
+        f"{src.stem}.patched{src.suffix}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    same = dest == src
+    if dest.exists() and not same and not overwrite:
+        try:
+            with zipfile.ZipFile(dest) as existing:
+                if all(existing.read(name) == content for name, content in modified.items()):
+                    return {"path": str(dest), "changed": False, "already_applied": True,
+                            "backup": None}
+        except (OSError, KeyError, zipfile.BadZipFile):
+            pass
+        raise ValueError(f"Output already exists: {dest}. Set overwrite=true to replace it.")
+    backup_path = None
+    if same:
+        if not backup:
+            raise ValueError("In-place edits require backup=true; refusing silent overwrite")
+        backup_path = src.with_suffix(src.suffix + ".bak")
+        if backup_path.exists():
+            raise ValueError(f"Backup already exists: {backup_path}; refusing to overwrite it")
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
+    with zipfile.ZipFile(src) as original:
+        names = set(original.namelist())
+        if missing := set(modified) - names:
+            raise ValueError(f"Word package part not found: {', '.join(sorted(missing))}")
+        before_root = etree.fromstring(original.read("word/document.xml"), parser)
+        before_p, before_t = _counts(before_root)
+        for name in (n for n in names if n.endswith((".xml", ".rels"))):
+            etree.fromstring(modified.get(name, original.read(name)), parser)
+        fd, temporary = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent)
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as output:
+                for info in original.infolist():
+                    output.writestr(info, modified.get(info.filename, original.read(info.filename)))
+            with zipfile.ZipFile(temporary) as result:
+                if bad := result.testzip():
+                    raise ValueError(f"Output DOCX ZIP validation failed at {bad}")
+                after_root = etree.fromstring(result.read("word/document.xml"), parser)
+            after_p, after_t = _counts(after_root)
+            if backup_path:
+                shutil.copy2(src, backup_path)
+            os.replace(temporary, dest)
+        except Exception:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+            raise
+    return {"path": str(dest), "backup": str(backup_path) if backup_path else None,
+            "changed": True, "paragraphs_before": before_p, "paragraphs_after": after_p,
+            "paragraphs_added": max(after_p - before_p, 0),
+            "paragraphs_removed": max(before_p - after_p, 0),
+            "tables_before": before_t, "tables_after": after_t}
+
+
+def find_text(path: str, query: str, regex: bool = False,
+              case_sensitive: bool = True) -> dict:
+    """Search paragraphs in document body, all tables, headers and footers."""
+    src = Path(path).expanduser().resolve()
+    if not query:
+        raise ValueError("query cannot be empty")
+    if not src.is_file():
+        raise ValueError(f"DOCX file not found: {src}")
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        pattern = re.compile(query if regex else re.escape(query), flags)
+    except re.error as exc:
+        raise ValueError(f"Invalid search regex: {exc}") from None
+    matches = []
+    with zipfile.ZipFile(src) as package:
+        for part in _document_parts(package):
+            root = etree.fromstring(package.read(part))
+            for index, paragraph in enumerate(root.iter(qn("w:p"))):
+                text = _text(paragraph)
+                for match in pattern.finditer(text):
+                    if match.end() == match.start():
+                        continue
+                    matches.append({"part": part, "paragraph_index": index,
+                                    "text": text, "match": match.group(0),
+                                    "start": match.start(), "end": match.end()})
+    return {"path": str(src), "query": query, "count": len(matches), "matches": matches}
+
+
+def replace_text_all(path: str, find: str, replace: str, regex: bool = False,
+                     case_sensitive: bool = True, output_path: str | None = None,
+                     backup: bool = True, overwrite: bool = False) -> dict:
+    """Replace all matches across document body, tables, headers and footers."""
+    if not find:
+        raise ValueError("find cannot be empty")
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        pattern = re.compile(find if regex else re.escape(find), flags)
+    except re.error as exc:
+        raise ValueError(f"Invalid replacement regex: {exc}") from None
+    src = Path(path).expanduser().resolve()
+    if not src.is_file():
+        raise ValueError(f"DOCX file not found: {src}")
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
+    modified = {}
+    count = 0
+    by_part = {}
+    with zipfile.ZipFile(src) as package:
+        for part in _document_parts(package):
+            root = etree.fromstring(package.read(part), parser)
+            part_count = 0
+            for paragraph in root.iter(qn("w:p")):
+                text = _text(paragraph)
+                matches = [m for m in pattern.finditer(text) if m.end() > m.start()]
+                for match in reversed(matches):
+                    value = match.expand(replace) if regex else replace
+                    _replace_range(paragraph, match.start(), match.end(), value)
+                    part_count += 1
+            if part_count:
+                modified[part] = etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                                                standalone=True)
+                by_part[part] = part_count
+                count += part_count
+    if not count:
+        return {"path": str(src), "changed": False, "already_replaced": True,
+                "replacements": 0, "by_part": {}}
+    result = _rewrite_parts(str(src), modified, output_path, backup, overwrite)
+    result.update({"replacements": count, "by_part": by_part,
+                   "already_replaced": result.get("already_applied", False)})
+    return result
+
+
+def fill_template(path: str, data: dict, output_path: str | None = None,
+                  backup: bool = True, overwrite: bool = False) -> dict:
+    """Fill ``{{key}}`` placeholders across document, tables, headers and footers."""
+    if not isinstance(data, dict):
+        raise ValueError("data must be an object/dictionary")
+    values = {str(key): (" • ".join(map(str, value)) if isinstance(value, (list, tuple))
+                         else "" if value is None else str(value))
+              for key, value in data.items()}
+    src = Path(path).expanduser().resolve()
+    if not src.is_file():
+        raise ValueError(f"DOCX file not found: {src}")
+    placeholder = re.compile(r"\{\{\s*([^{}]+?)\s*}}")
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
+    modified = {}
+    by_part = {}
+    total = 0
+    matched_keys: set[str] = set()
+    all_text = []
+    with zipfile.ZipFile(src) as package:
+        for part in _document_parts(package):
+            root = etree.fromstring(package.read(part), parser)
+            part_count = 0
+            for paragraph in root.iter(qn("w:p")):
+                text = _text(paragraph)
+                all_text.append(text)
+                matches = [m for m in placeholder.finditer(text)
+                           if m.group(1).strip() in values]
+                for match in reversed(matches):
+                    key = match.group(1).strip()
+                    value = values[key]
+                    _replace_range(paragraph, match.start(), match.end(), value)
+                    part_count += 1
+                    matched_keys.add(key)
+            if part_count:
+                modified[part] = etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                                                standalone=True)
+                by_part[part] = part_count
+                total += part_count
+    if not total:
+        text = "\n".join(all_text)
+        already = bool(values) and all(not value or value in text for value in values.values())
+        return {"path": str(src), "changed": False, "already_filled": already,
+                "replacements": 0, "by_part": {},
+                "unmatched_keys": sorted(set(values) - matched_keys)}
+    result = _rewrite_parts(str(src), modified, output_path, backup, overwrite)
+    result.update({"replacements": total, "by_part": by_part,
+                   "already_filled": result.get("already_applied", False),
+                   "unmatched_keys": sorted(set(values) - matched_keys)})
+    return result
 
 
 def _target_cell(body, operation: dict):
@@ -248,6 +456,50 @@ def _apply(body, styles_root, operation: dict) -> int:
     raise ValueError(f"Unknown patch operation: {action!r}")
 
 
+def _already_applied(body, operation: dict) -> bool:
+    action = operation.get("op") or operation.get("action")
+    if action == "replace_text":
+        anchor = str(operation.get("anchor", ""))
+        replacement = str(operation.get("new_text", ""))
+        try:
+            target = _resolve_paragraph(body, anchor)
+        except ValueError:
+            candidates = [p for p in _all_paragraphs(body) if replacement and
+                          replacement in _visible_text(p)]
+            return len(candidates) == 1
+        return anchor not in _visible_text(target) and replacement in _visible_text(target)
+    if action in ("insert_after", "insert_code_block"):
+        try:
+            target = _resolve_paragraph(body, str(operation.get("anchor", "")))
+        except ValueError:
+            return False
+        if action == "insert_code_block":
+            expected = [str(operation.get("text", ""))]
+        else:
+            expected = [str(spec.get("text", "") if isinstance(spec, dict) else spec)
+                        for spec in _paragraph_specs(operation.get("paragraphs", []))]
+        node = target.getnext()
+        for text in expected:
+            while node is not None and node.tag != qn("w:p"):
+                return False
+            if node is None or _visible_text(node) != text:
+                return False
+            node = node.getnext()
+        return bool(expected)
+    if action in ("fill_table_cell", "append_to_cell"):
+        try:
+            cell = _target_cell(body, operation)
+        except (KeyError, ValueError):
+            return False
+        current = [_visible_text(p) for p in cell.findall(qn("w:p"))]
+        content = str(operation.get("content", ""))
+        lines = content.split("\n")
+        if action == "fill_table_cell":
+            return "\n".join(current) == content
+        return len(current) >= len(lines) and current[-len(lines):] == lines
+    return False
+
+
 def _counts(root) -> tuple[int, int]:
     return len(list(root.iter(qn("w:p")))), len(list(root.iter(qn("w:tbl"))))
 
@@ -265,18 +517,31 @@ def _heading_texts(root) -> list[str]:
 
 
 def patch_docx(path: str, operations: list[dict], output_path: str | None = None,
-               backup: bool = True, overwrite: bool = False) -> dict:
+               backup: bool = True, overwrite: bool = False,
+               idempotent: bool = True) -> dict:
     """Apply anchored changes to DOCX OOXML while preserving untouched ZIP parts."""
     src = Path(path).expanduser().resolve()
     if not src.is_file():
         raise ValueError(f"DOCX file not found: {src}")
     if src.suffix.lower() not in (".docx", ".docm"):
         raise ValueError("docx_patch supports .docx and .docm files")
+    if not operations:
+        raise ValueError("operations must contain at least one patch operation")
+    if any(not isinstance(operation, dict) for operation in operations):
+        raise ValueError("Each operation must be an object")
     dest = Path(output_path).expanduser().resolve() if output_path else src.with_name(
         f"{src.stem}.patched{src.suffix}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     same = dest == src
     if dest.exists() and not same and not overwrite:
+        try:
+            with zipfile.ZipFile(dest) as existing:
+                existing_root = etree.fromstring(existing.read("word/document.xml"))
+                if operations and all(_already_applied(existing_root, op) for op in operations):
+                    return {"path": str(dest), "changed": False, "already_applied": True,
+                            "operations_skipped": len(operations), "backup": None}
+        except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError):
+            pass
         raise ValueError(f"Output already exists: {dest}. Set overwrite=true to replace it.")
     backup_path = None
     if same:
@@ -284,9 +549,18 @@ def patch_docx(path: str, operations: list[dict], output_path: str | None = None
             raise ValueError("In-place edits require backup=true; refusing silent overwrite.")
         backup_path = src.with_suffix(src.suffix + ".bak")
         if backup_path.exists():
+            if idempotent:
+                with zipfile.ZipFile(src) as current:
+                    current_root = etree.fromstring(current.read("word/document.xml"))
+                    if all(_already_applied(current_root, op) for op in operations):
+                        current_p, current_t = _counts(current_root)
+                        return {"path": str(src), "changed": False, "already_applied": True,
+                                "operations_skipped": len(operations), "backup": str(backup_path),
+                                "paragraphs_before": current_p, "paragraphs_after": current_p,
+                                "paragraphs_added": 0, "paragraphs_removed": 0,
+                                "tables_before": current_t, "tables_after": current_t,
+                                "headings_preserved": True}
             raise ValueError(f"Backup already exists: {backup_path}; refusing to overwrite it.")
-    if not operations:
-        raise ValueError("operations must contain at least one patch operation")
 
     with zipfile.ZipFile(src) as original:
         try:
@@ -301,10 +575,20 @@ def patch_docx(path: str, operations: list[dict], output_path: str | None = None
         before_p, before_t = _counts(root)
         before_headings = _heading_texts(root)
         added = 0
+        skipped = 0
         for operation in operations:
             if not isinstance(operation, dict):
                 raise ValueError("Each operation must be an object")
+            if idempotent and _already_applied(body, operation):
+                skipped += 1
+                continue
             added += _apply(body, styles_root, operation)
+        if skipped == len(operations):
+            return {"path": str(src), "changed": False, "already_applied": True,
+                    "operations_skipped": skipped, "paragraphs_before": before_p,
+                    "paragraphs_after": before_p, "paragraphs_added": 0,
+                    "paragraphs_removed": 0, "tables_before": before_t,
+                    "tables_after": before_t, "headings_preserved": True}
         after_p, after_t = _counts(root)
         after_headings = _heading_texts(root)
         missing = [heading for heading in before_headings if heading not in after_headings]
@@ -350,8 +634,10 @@ def patch_docx(path: str, operations: list[dict], output_path: str | None = None
                 pass
             raise
     return {"path": str(dest), "backup": str(backup_path) if backup_path else None,
+            "changed": True, "already_applied": False, "operations_skipped": skipped,
             "paragraphs_before": before_p, "paragraphs_after": after_p,
-            "paragraphs_added": after_p - before_p, "paragraphs_removed": before_p - after_p,
+            "paragraphs_added": max(after_p - before_p, 0),
+            "paragraphs_removed": max(before_p - after_p, 0),
             "tables_before": before_t, "tables_after": after_t,
             "headings_preserved": True}
 
@@ -562,6 +848,7 @@ def insert_image(path: str, image_path: str, anchor: str | None = None,
 
     return {"path": str(dest), "backup": str(backup_path) if backup_path else None,
             "paragraphs_before": before_p, "paragraphs_after": after_p,
-            "paragraphs_added": after_p - before_p, "paragraphs_removed": before_p - after_p,
+            "paragraphs_added": max(after_p - before_p, 0),
+            "paragraphs_removed": max(before_p - after_p, 0),
             "tables_before": before_t, "tables_after": after_t,
             "images_added": 1, "caption_added": bool(caption), "headings_preserved": True}
