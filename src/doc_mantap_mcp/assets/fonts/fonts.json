@@ -1,0 +1,122 @@
+[
+ {
+  "family": "Inter",
+  "weight": 400,
+  "style": "italic",
+  "file": "inter/400-italic.woff2"
+ },
+ {
+  "family": "Inter",
+  "weight": 400,
+  "style": "normal",
+  "file": "inter/400-normal.woff2"
+ },
+ {
+  "family": "Inter",
+  "weight": 600,
+  "style": "normal",
+  "file": "inter/600-normal.woff2"
+ },
+ {
+  "family": "Inter",
+  "weight": 700,
+  "style": "normal",
+  "file": "inter/700-normal.woff2"
+ },
+ {
+  "family": "Inter",
+  "weight": 800,
+  "style": "normal",
+  "file": "inter/800-normal.woff2"
+ },
+ {
+  "family": "JetBrains Mono",
+  "weight": 400,
+  "style": "normal",
+  "file": "jetbrains-mono/400-normal.woff2"
+ },
+ {
+  "family": "JetBrains Mono",
+  "weight": 700,
+  "style": "normal",
+  "file": "jetbrains-mono/700-normal.woff2"
+ },
+ {
+  "family": "Playfair Display",
+  "weight": 400,
+  "style": "italic",
+  "file": "playfair-display/400-italic.woff2"
+ },
+ {
+  "family": "Playfair Display",
+  "weight": 400,
+  "style": "normal",
+  "file": "playfair-display/400-normal.woff2"
+ },
+ {
+  "family": "Playfair Display",
+  "weight": 700,
+  "style": "normal",
+  "file": "playfair-display/700-normal.woff2"
+ },
+ {
+  "family": "Playfair Display",
+  "weight": 800,
+  "style": "normal",
+  "file": "playfair-display/800-normal.woff2"
+ },
+ {
+  "family": "Plus Jakarta Sans",
+  "weight": 400,
+  "style": "italic",
+  "file": "plus-jakarta-sans/400-italic.woff2"
+ },
+ {
+  "family": "Plus Jakarta Sans",
+  "weight": 400,
+  "style": "normal",
+  "file": "plus-jakarta-sans/400-normal.woff2"
+ },
+ {
+  "family": "Plus Jakarta Sans",
+  "weight": 600,
+  "style": "normal",
+  "file": "plus-jakarta-sans/600-normal.woff2"
+ },
+ {
+  "family": "Plus Jakarta Sans",
+  "weight": 700,
+  "style": "normal",
+  "file": "plus-jakarta-sans/700-normal.woff2"
+ },
+ {
+  "family": "Plus Jakarta Sans",
+  "weight": 800,
+  "style": "normal",
+  "file": "plus-jakarta-sans/800-normal.woff2"
+ },
+ {
+  "family": "Source Serif 4",
+  "weight": 400,
+  "style": "italic",
+  "file": "source-serif-4/400-italic.woff2"
+ },
+ {
+  "family": "Source Serif 4",
+  "weight": 400,
+  "style": "normal",
+  "file": "source-serif-4/400-normal.woff2"
+ },
+ {
+  "family": "Source Serif 4",
+  "weight": 600,
+  "style": "normal",
+  "file": "source-serif-4/600-normal.woff2"
+ },
+ {
+  "family": "Source Serif 4",
+  "weight": 700,
+  "style": "normal",
+  "file": "source-serif-4/700-normal.woff2"
+ }
+]
