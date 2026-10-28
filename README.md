@@ -13,7 +13,10 @@ The AI writes Markdown or a small declarative spec, and doc-mantap-mcp turns it 
 - `docx_read` / `docx_outline`: inspect Word text, structure, formatting and placeholders
 - `docx_patch`: make anchored, in-place-safe edits to an existing DOCX/DOCM
 - `docx_insert_image`: insert screenshots into paragraphs or table cells
+- `docx_find` / `docx_replace_all`: search or replace across body, tables and headers/footers
+- `docx_fill_template`: fill `{{key}}` placeholders in one file or a batch
 - `pdf_read_text`: extract PDF text page by page, with optional Tesseract OCR fallback
+- `doctor`: check dependencies, Office converters, OCR languages and fonts
 - `create_excel`: designed workbook with real Excel tables, formulas and charts
 - `preview_document`: render pages of a generated file as images to check the layout
 
@@ -59,6 +62,11 @@ Tesseract when available (`brew install tesseract tesseract-lang` on macOS or
 macOS QuickLook for Office files. It returns rendered image content plus JSON metadata
 (page numbers, image paths/URIs and dimensions). Page selection, width/DPI, PNG/JPEG,
 and `max_pages` are configurable; cached previews invalidate when file content changes.
+
+`docx://{absolute-path}#outline` exposes the compact DOCX outline as an MCP resource.
+`docx_patch` accepts a `batch` of `{path, operations, output_path?}` items and skips
+already-applied insert/fill operations by default. `docx_fill_template` accepts a batch
+of `{path, data, output_path?}` items; repeat fills are safe no-ops.
 
 ## Setup
 
