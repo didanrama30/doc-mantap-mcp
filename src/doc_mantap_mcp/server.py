@@ -8,8 +8,11 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 
 from .docx_render import render_docx
+from .docx_inspect import outline_docx, read_docx
+from .docx_patch import patch_docx
 from .guide import guide
 from .pdf import render_pdf
+from .pdf_read import read_pdf_text
 from .preview import render_pages
 from .themes import THEMES, get_theme
 from .xlsx_render import render_xlsx
@@ -28,6 +31,9 @@ mcp = MCPServer(
         "(\\pagebreak).\n"
         "- Spreadsheets: create_excel builds designed workbooks with real Excel tables, "
         "formulas, KPI cards, conditional formatting and native charts.\n"
+        "- Existing files: docx_read/docx_outline inspect Word templates, docx_patch makes "
+        "anchored edits, and pdf_read_text extracts PDF page text. markdown_to_docx supports "
+        "mode='append' with target_path to add Markdown to an existing Word file.\n"
         "Call design_guide once for the full syntax and design rules, list_themes for themes, "
         "and preview_document to look at the result before handing it over."
     ),
@@ -66,6 +72,46 @@ def design_guide(topic: Literal["documents", "excel", "all"] = "all") -> str:
     Read it before writing a long document or a workbook.
     """
     return guide(topic)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Read Word document", read_only_hint=True))
+@_explain
+def docx_read(path: str, include_runs: bool = True,
+              include_headers_footers: bool = True) -> dict:
+    """Read DOCX text, paragraph styles, run formatting, tables and document furniture as JSON.
+
+    This reads OOXML directly through python-docx; LibreOffice is not required.
+    """
+    return read_docx(path, include_runs, include_headers_footers)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Word document outline", read_only_hint=True))
+@_explain
+def docx_outline(path: str) -> dict:
+    """Return compact heading hierarchy, table dimensions and detected placeholders."""
+    return outline_docx(path)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Patch Word document", read_only_hint=False,
+                                     destructive_hint=True, idempotent_hint=False))
+@_explain
+def docx_patch(path: str, operations: list[dict], output_path: str | None = None,
+               backup: bool = True, overwrite: bool = False) -> dict:
+    """Patch existing DOCX/DOCM in OOXML without regenerating its structure.
+
+    Operations: replace_text(anchor, new_text), insert_after(anchor, paragraphs),
+    fill_table_cell(table, row, col, content), append_to_cell(...), or
+    insert_code_block(anchor, text). Default output is a new .patched file. To edit
+    in place, set output_path to path; an unused .bak is required automatically.
+    """
+    return patch_docx(path, operations, output_path, backup, overwrite)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Read PDF text", read_only_hint=True))
+@_explain
+def pdf_read_text(path: str, ocr: bool = True, language: str = "eng+ind") -> dict:
+    """Extract native PDF text per page; OCR blank/scanned pages with Tesseract if installed."""
+    return read_pdf_text(path, ocr, language)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Markdown to PDF", **_WRITE))
@@ -112,16 +158,19 @@ def markdown_to_pdf(content: str, output_path: str, theme: str = "modern",
             "Use preview_document to check the layout.")
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Markdown to Word", **_WRITE))
+@mcp.tool(annotations=ToolAnnotations(title="Markdown to Word", read_only_hint=False,
+                                     destructive_hint=True, idempotent_hint=False))
 @_explain
-def markdown_to_docx(content: str, output_path: str, theme: str = "modern",
+def markdown_to_docx(content: str, output_path: str | None = None, theme: str = "modern",
                      title: str | None = None, subtitle: str | None = None,
                      author: str | None = None, date: str | None = None,
                      organization: str | None = None, document_type: str | None = None,
                      logo: str | None = None, cover_style: str | None = None,
                      toc: bool = False, page_size: str = "A4", orientation: str = "portrait",
                      lang: str = "en", primary_color: str | None = None,
-                     accent_color: str | None = None, base_dir: str | None = None) -> str:
+                     accent_color: str | None = None, base_dir: str | None = None,
+                     mode: Literal["create", "append"] = "create",
+                     target_path: str | None = None, start_after: str | None = None) -> str:
     """Convert Markdown into a styled, editable Word document.
 
     Uses real Word styles (headings, lists, captions, TOC) so the file stays easy to edit.
@@ -129,7 +178,8 @@ def markdown_to_docx(content: str, output_path: str, theme: str = "modern",
 
     Args:
         content: Document body in Markdown.
-        output_path: Output file path, e.g. ~/Documents/report.docx.
+        output_path: Output file path, e.g. ~/Documents/report.docx. In append mode, defaults
+            to a sibling .appended.docx file; pass target_path to update target itself with backup.
         theme: modern, corporate, academic, fresh, elegant, minimal, startup or warm.
         title: Adds a cover page with this title.
         subtitle: Cover subtitle.
@@ -146,14 +196,19 @@ def markdown_to_docx(content: str, output_path: str, theme: str = "modern",
         primary_color: Brand color (hex) replacing the theme's primary color.
         accent_color: Brand accent color (hex).
         base_dir: Folder that relative image paths are resolved against (default: output folder).
+        mode: "create" for a designed document, or "append" to add content to target_path.
+        target_path: Existing .docx to preserve and append into when mode="append".
+        start_after: Unique paragraph text or p:index insertion point in append mode.
     """
     path = render_docx(content, output_path, get_theme(theme, primary_color, accent_color),
                        title, subtitle, author, date, organization=organization,
                        document_type=document_type, logo=logo, cover_style=cover_style,
                        toc=toc, page_size=page_size, orientation=orientation, lang=lang,
-                       base_dir=base_dir)
+                       base_dir=base_dir, mode=mode, target_path=target_path,
+                       start_after=start_after)
     note = " Word will offer to update fields on open; accept to fill in the TOC." if toc else ""
-    return f"DOCX created: {path}.{note}"
+    action = "DOCX updated" if mode == "append" else "DOCX created"
+    return f"{action}: {path}.{note}"
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Create Excel workbook", **_WRITE))

@@ -10,6 +10,9 @@ The AI writes Markdown or a small declarative spec, and doc-mantap-mcp turns it 
 - `design_guide`: syntax reference (callouts, KPI cards, charts, Excel spec) and design rules
 - `markdown_to_pdf`: Markdown to a polished PDF
 - `markdown_to_docx`: Markdown to an editable Word document
+- `docx_read` / `docx_outline`: inspect Word text, structure, formatting and placeholders
+- `docx_patch`: make anchored, in-place-safe edits to an existing DOCX/DOCM
+- `pdf_read_text`: extract PDF text page by page, with optional Tesseract OCR fallback
 - `create_excel`: designed workbook with real Excel tables, formulas and charts
 - `preview_document`: render pages of a generated file as images to check the layout
 
@@ -38,6 +41,15 @@ series:
 ```
 
 Also supported: tables, footnotes, task lists, definition lists, images with captions, syntax-highlighted code, `\pagebreak`, `toc=true`, page size/orientation and `lang` (`en`, `id`, ...) for labels and number formats.
+
+To add Markdown to an existing Word template, call `markdown_to_docx` with
+`mode="append"`, `target_path="template.docx"`, and an optional `start_after` paragraph
+anchor. Existing document styles and headers/footers are retained. `docx_patch` writes a
+new `.patched.docx` by default; explicit in-place edits create a `.bak` first.
+
+`pdf_read_text` extracts native page text without Office software. Scanned pages use
+Tesseract when available (`brew install tesseract tesseract-lang` on macOS or
+`apt install tesseract-ocr tesseract-ocr-ind` on Debian/Ubuntu).
 
 ## Setup
 

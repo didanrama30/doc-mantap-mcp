@@ -19,6 +19,7 @@ from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
 from docx.shared import Cm, Emu, Mm, Pt, RGBColor
 from docx.text.run import Run
+from docx.text.paragraph import Paragraph
 
 from . import highlight
 from .charts import render_chart
@@ -236,12 +237,12 @@ class Fmt:
 # --------------------------------------------------------------------------- #
 
 class DocxBuilder:
-    def __init__(self, theme: Theme, setup: PageSetup, lang: str):
+    def __init__(self, theme: Theme, setup: PageSetup, lang: str, document=None):
         self.t = theme
         self.setup = setup
         self.lang = lang or "en"
         self.names = labels(self.lang)
-        self.document = Document()
+        self.document = document or Document()
         self.width_emu = int(Cm(setup.text_width_cm))
         self._bookmark = 0
         self._anchors: dict[str, str] = {}
@@ -1175,17 +1176,27 @@ def _wrap(node) -> Tag:
     return span
 
 
-def render_docx(content: str, output_path: str, theme: Theme, title: str | None = None,
+def render_docx(content: str, output_path: str | None, theme: Theme, title: str | None = None,
                 subtitle: str | None = None, author: str | None = None,
                 date: str | None = None, *, organization: str | None = None,
                 document_type: str | None = None, logo: str | None = None,
                 cover_style: str | None = None, toc: bool = False, page_size: str = "A4",
                 orientation: str = "portrait", lang: str = "en",
-                base_dir: str | None = None) -> Path:
+                base_dir: str | None = None, mode: str = "create",
+                target_path: str | None = None, start_after: str | None = None) -> Path:
+    mode = (mode or "create").lower()
+    if mode not in ("create", "append"):
+        raise ValueError("mode must be 'create' or 'append'")
+    if mode == "append" and not target_path:
+        raise ValueError("target_path is required when mode='append'")
+    if mode == "append" and output_path is None:
+        target_hint = Path(target_path).expanduser().resolve()
+        output_path = str(target_hint.with_name(f"{target_hint.stem}.appended.docx"))
+    if not output_path:
+        raise ValueError("output_path is required when mode='create'")
     out = prepare_output(output_path, ".docx")
     base = Path(base_dir).expanduser().resolve() if base_dir else out.parent
-    style = (cover_style or theme.cover).lower()
-    if style not in COVER_STYLES:
+    if mode == "create" and (cover_style or theme.cover).lower() not in COVER_STYLES:
         raise ValueError(f"Unknown cover_style '{cover_style}'. Use: {', '.join(COVER_STYLES)}.")
     logo_path = None
     if logo:
@@ -1195,32 +1206,93 @@ def render_docx(content: str, output_path: str, theme: Theme, title: str | None 
             raise ValueError(f"Logo file not found: {logo_path}")
 
     doc = parse_markdown(content, lang=lang, base_dir=base)
-    b = DocxBuilder(theme, page_setup(page_size, orientation), lang)
+    target = None
+    if mode == "append":
+        target = Path(target_path).expanduser().resolve()
+        if not target.is_file():
+            raise ValueError(f"Target document not found: {target}")
+        if target.suffix.lower() != ".docx":
+            raise ValueError("markdown_to_docx append mode currently supports .docx targets")
+        if out.exists() and out != target:
+            raise ValueError(f"Output already exists: {out}; choose a new output_path")
+        d = Document(str(target))
+        section = d.sections[-1]
+        setup = PageSetup(section.page_width.mm, section.page_height.mm,
+                          section.left_margin.mm, section.top_margin.mm,
+                          section.bottom_margin.mm)
+        if start_after:
+            existing_paragraphs = [Paragraph(p, d) for p in d.element.body.iter(qn("w:p"))]
+            if start_after.startswith("p:") and start_after[2:].isdigit():
+                index = int(start_after[2:])
+                if index >= len(existing_paragraphs):
+                    raise ValueError(f"Paragraph anchor out of range: {start_after}")
+                insertion_anchor = existing_paragraphs[index]._p
+            else:
+                matches = [p for p in existing_paragraphs if start_after in p.text]
+                if len(matches) != 1:
+                    raise ValueError(f"start_after must match exactly one paragraph; found {len(matches)}")
+                insertion_anchor = matches[0]._p
+        else:
+            insertion_anchor = None
+        original_elements = set(d.element.body)
+        b = DocxBuilder(theme, setup, lang, document=d)
+        b.base = theme.body_size_pt
+    else:
+        setup = page_setup(page_size, orientation)
+        b = DocxBuilder(theme, setup, lang)
     b.doc = doc
-    b.setup_page()
-    b.setup_styles()
     d = b.document
-    first_h1 = next((h.text for h in doc.headings if h.level == 1), "")
-    section_style = ("Heading 1" if any(h.level == 1 for h in doc.headings) else
-                     "Heading 2" if any(h.level == 2 for h in doc.headings) else None)
-    b.header_footer(title or first_h1, organization or author or "", bool(title), section_style)
-    props = d.core_properties
-    props.title = title or first_h1 or ""
-    props.subject = subtitle or ""
-    props.author = author or ""
-    props.comments = "Created with doc-mantap-mcp"
-    props.language = lang
-    if title:
-        b.cover(style, title, subtitle, author, date, organization, document_type, logo_path)
-    if toc:
-        b.toc(doc)
-        _setting(d, "w:updateFields", {"w:val": "true"})
-    if theme.justify:
-        _setting(d, "w:autoHyphenation", {"w:val": "true"})
-    zoom = d.settings.element.find(qn("w:zoom"))
-    if zoom is not None and zoom.get(qn("w:percent")) is None:
-        zoom.set(qn("w:percent"), "100")  # required by the schema, missing in the template
+    if mode == "create":
+        b.setup_page()
+        b.setup_styles()
+        first_h1 = next((h.text for h in doc.headings if h.level == 1), "")
+        section_style = ("Heading 1" if any(h.level == 1 for h in doc.headings) else
+                         "Heading 2" if any(h.level == 2 for h in doc.headings) else None)
+        b.header_footer(title or first_h1, organization or author or "", bool(title), section_style)
+        props = d.core_properties
+        props.title = title or first_h1 or ""
+        props.subject = subtitle or ""
+        props.author = author or ""
+        props.comments = "Created with doc-mantap-mcp"
+        props.language = lang
+        if title:
+            b.cover((cover_style or theme.cover).lower(), title, subtitle, author, date,
+                    organization, document_type, logo_path)
+        if toc:
+            b.toc(doc)
+            _setting(d, "w:updateFields", {"w:val": "true"})
+        if theme.justify:
+            _setting(d, "w:autoHyphenation", {"w:val": "true"})
+        zoom = d.settings.element.find(qn("w:zoom"))
+        if zoom is not None and zoom.get(qn("w:percent")) is None:
+            zoom.set(qn("w:percent"), "100")  # required by the schema, missing in the template
     b.blocks(d, list(doc.soup.children))
     b.notes(doc)
-    d.save(str(out))
+    if mode == "append" and insertion_anchor is not None:
+        added = [child for child in d.element.body if child not in original_elements
+                 and child.tag != qn("w:sectPr")]
+        cursor = insertion_anchor
+        for child in added:
+            child.getparent().remove(child)
+            cursor.addnext(child)
+            cursor = child
+    if mode == "append" and target == out:
+        backup = target.with_suffix(target.suffix + ".bak")
+        if backup.exists():
+            raise ValueError(f"Backup already exists: {backup}; refusing to overwrite it")
+        import os
+        import shutil
+        import tempfile
+        fd, temporary = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=out.parent)
+        os.close(fd)
+        try:
+            d.save(temporary)
+            shutil.copy2(target, backup)
+            os.replace(temporary, out)
+        except Exception:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+            raise
+    else:
+        d.save(str(out))
     return out
